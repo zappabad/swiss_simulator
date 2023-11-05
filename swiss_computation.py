@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from threading import Lock
 from itertools import combinations
-import heapq
+import re
 
 class Deck:
     def __init__(self, name):
@@ -140,7 +140,7 @@ class Player:
         tournament_results = [history for history in self.history if history[0] == tournament.name]
         return tournament_results
 
-    def get_tournament_standing(self, tournament):
+    def get_tournament_w_l(self, tournament):
         tournament_results = [history for history in self.history if history[0] == tournament.name]
         wins = 0
         losses = 0
@@ -152,39 +152,26 @@ class Player:
                 losses += 1
         return (wins, losses)
 
-    def get_tournament_score(self, tournament, decay_factor=1):
+    def get_tournament_standing(self):
         """
-        Calculate the player's tournament score with a decay factor.
-        Earlier wins are worth more than later wins.
-        """
-        tournament_results = self.get_tournament_history(tournament)
-        score = 0
-        base_score = len(tournament_results)  # Start scoring from the number of matches.
+        Calculate the player's tournament standing based on their match record.
         
-        # Loop over the results in reverse (to handle the decay factor correctly).
-        for result in reversed(tournament_results):
-            if result[-1] == "W":
-                score += base_score ** decay_factor
-            base_score -= 1  # Decrease the base score for the next round.
-        
-        return score
-
-    def get_opponents_match_win_percentage(self, tournament):
+        :param player_record: A list of 'W' and 'L' indicating wins and losses.
+        :return: A tuple containing total match points and cumulative tiebreaker score.
         """
-        Calculate the Opponents' Match-Win Percentage for the player.
-        """
-        opponents_win_percentage = []
-        for match in self.get_tournament_history(tournament):
-            opponent_id = match[2]  # Assuming the opponent's ID is the third item in the history.
-            opponent = tournament.get_player_by_id(opponent_id)
-            if opponent:
-                wins, _ = opponent.get_tournament_standing(tournament)
-                total_matches = len(opponent.get_tournament_history(tournament))
-                if total_matches > 0:  # To avoid division by zero
-                    opponents_win_percentage.append(wins / total_matches)
+        player_record = [entry[-1] for entry in self.history]
+        total_rounds = num_rounds
+        match_points = [1 if record == "W" else 0 for record in player_record]
+        total_points = 0
+        for match in match_points:
+            total_points += match
+        ctb_numerator = sum((1 if result == 'W' else 0) * (0.25 ** (total_rounds - round_number))
+                            for round_number, result in enumerate(player_record, 1))
+        ctb_denominator = sum(round_number * (0.25 ** (total_rounds - round_number))
+                            for round_number in range(1, total_rounds + 1))
+        ctb = ctb_numerator / ctb_denominator if ctb_denominator else 0
         
-        # Calculate the average opponents' win percentage.
-        return sum(opponents_win_percentage) / len(opponents_win_percentage) if opponents_win_percentage else 0
+        return total_points, ctb
 
     def __str__(self):
         return f"[{self.id}] {self.alias} ({self.get_deck().name}) - Skill Level: {self.skill}"
@@ -208,101 +195,99 @@ class Tournament:
 
     def __setstate__(self, state):
         self.rounds_played = state.get('rounds_played', 0)
-
-    def calculate_similarity_score(self, vector1, vector2):
-        """
-        Calculate the similarity score between two tournament vectors.
-        This uses the dot product to reward similarity in patterns of wins and losses.
-        """
-        # Normalize the vectors to unit vectors to only compare the patterns, not the lengths.
-        unit_vector1 = vector1 / np.linalg.norm(vector1)
-        unit_vector2 = vector2 / np.linalg.norm(vector2)
         
-        # Compute the dot product
-        similarity = np.dot(unit_vector1, unit_vector2)
+    def get_tournament_standings(self):
+        players_standings = [(player, player.get_tournament_standing()) for player in self.players]
         
-        return similarity
-
-    def calculate_similarity_scores(self):
-        # Initialize a dictionary to hold the sum of similarity scores for each player
-        similarity_scores = {player: 0 for player in self.players}
-
-        # Create a vector for each player
-        player_vectors = {player: player.get_tournament_vector() for player in self.players}
-
-        # Calculate the similarity score between each pair of players
-        for i, player1 in enumerate(self.players):
-            for player2 in self.players[i+1:]:  # Avoid repeating comparisons
-                score = self.calculate_similarity_score(player_vectors[player1], player_vectors[player2])
-                similarity_scores[player1] += score
-                similarity_scores[player2] += score
-
-        return similarity_scores
-
-    def sort_by_similarity(self):
-        # Calculate the similarity scores
-        similarity_scores = self.calculate_similarity_scores()
-
-        # Sort players by their similarity score
-        sorted_players = sorted(self.players, key=lambda player: similarity_scores[player], reverse=True)
-
+        # Sort players based on match points and CTB (tiebreaker), descending order
+        sorted_players = [standing[0] for standing in sorted(players_standings, key=lambda x: (x[1][0] + x[1][1]), reverse=True)]  # return players and their standings
         return sorted_players
+        
+    def inspect_player(self, id):
+        player_trajectory = {}
+        player_history = self.players[id].get_tournament_history(self)
+        
+        opponents = []
+        win_loss = []
+        round_number = []
+        for match in player_history:
+            opp_id = int(re.findall(r'\d+', match[-2])[0])
+            opponents.append(self.players[opp_id])
+            win_loss.append(match[-1])
+            round_number.append(match[-3])
+        
+        opp_id = []
+        opp_name = []
+        opp_deck = []
+        opp_skill = []
+        opp_traj = []
+        for opp in opponents:
+            opp_id.append(opp.id)
+            opp_name.append(opp.alias)
+            opp_deck.append(opp.deck.name)
+            opp_skill.append(opp.skill)
+            win_loss_opp = []
+            for match in self.players[opp.id].get_tournament_history(self):
+                win_loss_opp.append(match[-1])
+            opp_traj.append(win_loss_opp)
+        
+        player_trajectory['opp_id'] = opp_id
+        player_trajectory['opp_name'] = opp_name
+        player_trajectory['opp_deck'] = opp_deck
+        player_trajectory['opp_skill'] = opp_skill
+        player_trajectory['win_loss'] = win_loss
+        player_trajectory['opp_win_loss'] = opp_traj
+        
+        player_df = pd.DataFrame(player_trajectory)
+        return player_df
 
     def swiss_pairings(self):
-        sorted_players = self.sort_by_similarity()
+        """
+        Pair players based on their standings.
         
+        :param players_standings: A list of tuples, each containing a player ID, their match points, and CTB.
+        :return: A list of tuples, each representing a paired match.
+        """
+        
+        player_standings = self.get_tournament_standings()
+        
+        # Pair players
         pairings = []
-        while sorted_players:
-            p1 = sorted_players.pop(0)
-            # Check if there's another player to pair with, if not, p1 gets a bye
-            p2 = sorted_players.pop(0) if sorted_players else None
-            pairings.append((p1, p2)) if p2 else pairings.append((p1, 'Bye'))
+        while player_standings:
+            # Pop the highest-ranked player
+            highest_player = player_standings.pop(0)
             
+            # Find the next highest-ranked player who is not yet paired
+            for i, opponent in enumerate(player_standings):
+                # Assuming no byes, and players can be paired directly
+                pairings.append((highest_player, opponent))
+                player_standings.pop(i)
+                break
+        
         return pairings
 
     def create_pods(self):
         # Create pods based on current standings
-        sorted_players = sorted(self.players, key=lambda x: x.get_tournament_score(self), reverse=True)
-        return [sorted_players[i:i+8] for i in range(0, len(sorted_players), 8)]
-
-    def calculate_draft_similarity_score(self, history1, history2):
-        # Assuming histories are strings like "WWLLW", "LWWLW" etc.
-        score = sum(1 for h1, h2 in zip(history1, history2) if h1[-1] == h2[-1])
-        return score
-
-    def sort_players_by_draft_similarity(self, pod, standings):
-        # Calculate similarity scores for each combination of players in the pod
-        similarity_scores = {}
-        for p1, p2 in combinations(pod, 2):
-            score = self.calculate_draft_similarity_score(standings[p1], standings[p2])
-            similarity_scores[(p1, p2)] = score
+        players_standings = self.get_tournament_standings()
         
-        # Sort the list of players based on similarity scores
-        sorted_player_pairs = sorted(similarity_scores.items(), key=lambda item: item[1], reverse=True)
-        sorted_players_by_similarity = []
-        while sorted_player_pairs:
-            highest_pair = sorted_player_pairs.pop(0)[0]
-            sorted_players_by_similarity.extend(highest_pair)
-            # Remove pairs involving players already paired
-            sorted_player_pairs = [(pair, score) for pair, score in sorted_player_pairs if highest_pair[0] not in pair and highest_pair[1] not in pair]
-        
-        # We might have duplicates since players can be part of multiple pairs, so we'll deduplicate them
-        seen = set()
-        sorted_players_by_similarity = [x for x in sorted_players_by_similarity if not (x in seen or seen.add(x))]
-        return sorted_players_by_similarity
+        return [players_standings[i:i+8] for i in range(0, len(players_standings), 8)]
 
     def draft_swiss_pairings(self, pod):
         # Sort players by their win records first
         sorted_pod_players = sorted(pod, key=lambda x: self.current_draft_standings[x], reverse=True)
-        # Then sort by similarity of their tournament history
-        sorted_pod_players = self.sort_players_by_draft_similarity(sorted_pod_players, self.current_draft_standings)
         
+        # Pair players
         pairings = []
         while sorted_pod_players:
-            p1 = sorted_pod_players.pop(0)
-            # Since it's a draft pod, we're guaranteed to have an even number of players, so no need for a bye.
-            p2 = sorted_pod_players.pop(0)
-            pairings.append((p1, p2))
+            # Pop the highest-ranked player
+            highest_player = sorted_pod_players.pop(0)
+            
+            # Find the next highest-ranked player who is not yet paired
+            for i, opponent in enumerate(sorted_pod_players):
+                # Assuming no byes, and players can be paired directly
+                pairings.append((highest_player, opponent))
+                sorted_pod_players.pop(i)
+                break
             
         return pairings
 
@@ -327,7 +312,6 @@ class Tournament:
     
     def simulate_draft_round(self, pod):
         pairings = self.draft_swiss_pairings(pod)
-        self.rounds_played += 1
         for p1, p2 in pairings:
             p1_win_percentage = 0.5 + skill_value_modifier*(p1.skill - p2.skill)
             r = np.random.rand()
@@ -346,6 +330,7 @@ class Tournament:
         self.current_draft_standings = {player: [] for player in self.players}  # Use lists to hold match history
         pods = self.create_pods()
         for _ in range(n_rounds):
+            self.rounds_played += 1
             for pod in pods:
                 self.simulate_draft_round(pod)
         
@@ -362,9 +347,13 @@ class Tournament:
             print(f"{player.alias}: {player.get_tournament_history(self)}")
     
     def display_standings(self):
-        for player in self.players:
-            wins, losses = player.get_tournament_standing(self)
-            print(f"{player}: {wins}-{losses}")
+        players_standings = [(player, player.get_tournament_standing()) for player in self.players]
+        
+        # Sort players based on match points and CTB (tiebreaker), descending order
+        sorted_players = sorted(players_standings, key=lambda x: (x[1][0] + x[1][1]), reverse=True)  # return players and their standings
+        for player in sorted_players:
+            points, ctb = player.get_tournament_standing(self)
+            print(f"{player}: {points}-{ctb}")
     
     def get_player_by_id(self, player_id):
         """
@@ -380,11 +369,7 @@ class Tournament:
         Return the top n players based on their score and common tiebreakers.
         """
         # First sort by the primary score based on wins and similarity score.
-        primary_sorted_players = sorted(
-            self.players, 
-            key=lambda player: player.get_tournament_score(self), 
-            reverse=True
-        )
+        players_standings = self.get_tournament_standings()
 
         # # RULES FOR TIEBREAKER. CANT FIX, TOO HARD
         # # Now sort by the common tiebreakers.
@@ -399,7 +384,7 @@ class Tournament:
         #     reverse=True
         # )
 
-        return primary_sorted_players[:n]
+        return players_standings[:n]
     
     def get_win_prob_dataframe(self):
         """Retrieve the win probability for each player matrix as a DataFrame."""
@@ -453,12 +438,10 @@ def extract_tournament_data(tournament_id, tournament):
     return data
 
 # Number of tournaments to simulate
-num_tournaments = 1
+num_tournaments = 100000
 
 # Function to simulate a single tournament and extract data
 def simulate_and_extract(tournament_id):
-    with open("deck_manager.pkl", "rb") as f:
-        deck_manager = pickle.load(f)
     with open("players.pkl", "rb") as f:
         players = pickle.load(f)
     # Create the tournament object inside this function
@@ -467,23 +450,35 @@ def simulate_and_extract(tournament_id):
     data = extract_tournament_data(tournament_id, tournament)
     return data
 
+def simulate_tournament(tournament_id):
+    with open("players.pkl", "rb") as f:
+        players = pickle.load(f)
+    tournament = Tournament(f"Tournament #{tournament_id}", players, tournament_win_prob_matrix)
+    tournament.simulate_tournament()
+    return tournament
+
 if __name__ == '__main__':
-    # # Open the pickle file for writing
-    # with open("E:/fab-data/simplified_tournament_data_new_pairings.pkl", "wb") as f:
-    #     # Run the tournaments in parallel and extract data
-    #     with ProcessPoolExecutor() as executor:
-    #         # Generate tournament IDs and pass them to the executor
-    #         tournament_ids = range(num_tournaments)
-    #         for tournament_data in tqdm(executor.map(simulate_and_extract, tournament_ids), total=num_tournaments):
-    #             # Serialize the extracted data to the file
-    #             pickle.dump(tournament_data, f)
-    #                 # Profiling the simulate_and_extract function
-    profiler = cProfile.Profile()
-    profiler.enable()
+    # Open the pickle file for writing
+    with open("E:/fab-data/simplified_tournament_data_new_pairings.pkl", "wb") as f:
+        # Run the tournaments in parallel and extract data
+        with ProcessPoolExecutor() as executor:
+            # Generate tournament IDs and pass them to the executor
+            tournament_ids = range(num_tournaments)
+            for tournament_data in tqdm(executor.map(simulate_and_extract, tournament_ids), total=num_tournaments):
+                # Serialize the extracted data to the file
+                pickle.dump(tournament_data, f)
+                    # Profiling the simulate_and_extract function
     
-    # Call your simulate_and_extract function or the block of code you want to profile
-    simulate_and_extract(0)  # Replace with a real tournament ID to test
     
-    profiler.disable()
-    stats = pstats.Stats(profiler).sort_stats('cumtime')
-    stats.print_stats()
+    
+    
+# # Code for profiling a single run
+#     profiler = cProfile.Profile()
+#     profiler.enable()
+    
+#     # Call your simulate_and_extract function or the block of code you want to profile
+#     simulate_and_extract(0)  # Replace with a real tournament ID to test
+    
+#     profiler.disable()
+#     stats = pstats.Stats(profiler).sort_stats('cumtime')
+#     stats.print_stats()
